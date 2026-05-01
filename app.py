@@ -1,3 +1,4 @@
+import os
 from flask import Flask, request, jsonify
 from flask_cors import CORS
 import requests
@@ -5,22 +6,21 @@ import json
 import threading
 
 app = Flask(__name__)
-CORS(app) # Allows requests from any domain
+CORS(app)
 
-# === CONFIGURATION (আপনার আসল ডেটা দিন) ===
+# === CONFIGURATION (সঠিক ফরম্যাট) ===
 TELEGRAM_TOKEN = "8798938808:AAF712x7YhG_EQWw2HJ9_G4vymL8rseSbrI"
 TELEGRAM_CHAT_ID = "8127463560"
 AI_API_KEY = "AIzaSyCnEqCOxiwEttLQHSjGAwjkjalsZzwC_nE"
 
 def send_telegram_alert(message):
-    if not TELEGRAM_TOKEN or not TELEGRAM_CHAT_ID:
-        return
-    url = f"https://api.telegram.org/bot{8798938808:AAF712x7YhG_EQWw2HJ9_G4vymL8rseSbrI}/sendMessage"
-    payload = {"8127463560": TELEGRAM_CHAT_ID, "text": message, "parse_mode": "HTML"}
+    # সঠিক URL কনস্ট্রাকশন
+    url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
+    payload = {"chat_id": TELEGRAM_CHAT_ID, "text": message, "parse_mode": "HTML"}
     try:
         requests.post(url, json=payload, timeout=5)
-    except:
-        pass
+    except Exception as e:
+        print(f"Telegram Error: {e}")
 
 @app.route('/', methods=['GET'])
 def health_check():
@@ -32,32 +32,29 @@ def chat_engine():
         return jsonify({"status": "ok"}), 200
 
     data = request.json
-    client_id = data.get('client_id', 'Unknown')
     user_message = data.get('message', '')
 
     if not user_message:
-        return jsonify({"reply": "Empty transmission received."}), 400
+        return jsonify({"reply": "Empty transmission."}), 400
 
-    # 1. Background Telegram Alert for New Message
-    threading.Thread(target=send_telegram_alert, args=(f"<b>New Incoming Transmission:</b>\n{user_message}",)).start()
+    # Telegram Alert
+    threading.Thread(target=send_telegram_alert, args=(f"<b>New Incoming:</b> {user_message}",)).start()
 
-    # 2. AI Payload (Gemini)
-    url = f"https://generativelanguage.googleapis.com/v1beta/openai/chat/completions"
-    headers = {"Content-Type": "application/json", "Authorization": f"Bearer {AIzaSyCnEqCOxiwEttLQHSjGAwjkjalsZzwC_nE}"}
-
-    sys_prompt = "You are a professional SaaS AI assistant. Keep answers succinct (max 2 sentences). If the user provides a name AND email/phone, immediately call 'capture_lead'."
+    # Gemini API Call
+    url = "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions"
+    headers = {"Content-Type": "application/json", "Authorization": f"Bearer {AI_API_KEY}"}
     
     payload = {
         "model": "gemini-1.5-flash",
         "messages":[
-            {"role": "system", "content": sys_prompt},
+            {"role": "system", "content": "You are a friendly business assistant. If user gives name, email, or phone, call capture_lead."},
             {"role": "user", "content": user_message}
         ],
         "tools":[{
             "type": "function",
             "function": {
                 "name": "capture_lead",
-                "description": "Trigger when user gives contact details.",
+                "description": "Save lead info",
                 "parameters": {
                     "type": "object",
                     "properties": {
@@ -68,40 +65,31 @@ def chat_engine():
                     "required": ["name"]
                 }
             }
-        }],
-        "temperature": 0.5
+        }]
     }
 
     try:
         response = requests.post(url, headers=headers, json=payload, timeout=20)
         ai_data = response.json()
-        ai_msg = ai_data.get('choices', [{}])[0].get('message', {})
         
-        # 3. Detect if AI captured a lead
+        # এরর হ্যান্ডলিং (Gemini এরর চেক)
+        if "choices" not in ai_data:
+            return jsonify({"reply": "AI Service error: " + str(ai_data)})
+
+        ai_msg = ai_data['choices'][0]['message']
+        
+        # Lead detection
         if 'tool_calls' in ai_msg:
             func = ai_msg['tool_calls'][0]['function']
-            if func['name'] == 'capture_lead':
-                args = json.loads(func['arguments'])
-                u_name = args.get('name', 'User')
-                u_email = args.get('email', '')
-                u_phone = args.get('phone', '')
-                
-                # Send Urgent Telegram Lead Alert
-                lead_alert = f"🚀 <b>NEW LEAD SECURED!</b>\nName: {u_name}\nEmail: {u_email}\nPhone: {u_phone}"
-                threading.Thread(target=send_telegram_alert, args=(lead_alert,)).start()
-                
-                # We return a special flag so frontend JS knows to save it in InfinityFree DB
-                return jsonify({
-                    "reply": f"Data logged successfully, {u_name}! Our team will connect with you shortly.",
-                    "lead_captured": True,
-                    "lead_data": {"name": u_name, "email": u_email, "phone": u_phone}
-                })
+            args = json.loads(func['arguments'])
+            lead_alert = f"🚀 <b>LEAD SECURED!</b>\nName: {args.get('name')}\nEmail: {args.get('email')}\nPhone: {args.get('phone')}"
+            threading.Thread(target=send_telegram_alert, args=(lead_alert,)).start()
+            return jsonify({"reply": "Data logged successfully! Our team will contact you."})
 
-        reply_text = ai_msg.get('content', "Processing anomaly.")
-        return jsonify({"reply": reply_text, "lead_captured": False})
+        return jsonify({"reply": ai_msg.get('content', "No response")})
 
     except Exception as e:
-        return jsonify({"reply": "Neural network timeout. Retrying connection..."}), 500
+        return jsonify({"reply": "Neural connection failed: " + str(e)}), 500
 
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=5000)
