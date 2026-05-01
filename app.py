@@ -8,63 +8,33 @@ import threading
 app = Flask(__name__)
 CORS(app)
 
-# === CONFIGURATION (সঠিক ফরম্যাট) ===
-TELEGRAM_TOKEN = "8798938808:AAF712x7YhG_EQWw2HJ9_G4vymL8rseSbrI"
-TELEGRAM_CHAT_ID = "8127463560"
-AI_API_KEY = "AIzaSyCnEqCOxiwEttLQHSjGAwjkjalsZzwC_nE"
+# Render থেকে এপিআই কি নেওয়া হবে (নিরাপদ)
+AI_API_KEY = os.environ.get('AI_API_KEY')
+TELEGRAM_TOKEN = os.environ.get('TELEGRAM_TOKEN')
+TELEGRAM_CHAT_ID = os.environ.get('TELEGRAM_CHAT_ID')
 
 def send_telegram_alert(message):
-    # সঠিক URL কনস্ট্রাকশন
+    if not TELEGRAM_TOKEN or not TELEGRAM_CHAT_ID: return
     url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
     payload = {"chat_id": TELEGRAM_CHAT_ID, "text": message, "parse_mode": "HTML"}
-    try:
-        requests.post(url, json=payload, timeout=5)
-    except Exception as e:
-        print(f"Telegram Error: {e}")
-
-@app.route('/', methods=['GET'])
-def health_check():
-    return jsonify({"status": "ByteNest AI Is Online"}), 200
+    try: requests.post(url, json=payload, timeout=5)
+    except: pass
 
 @app.route('/api/chat', methods=['POST', 'OPTIONS'])
 def chat_engine():
-    if request.method == 'OPTIONS':
-        return jsonify({"status": "ok"}), 200
+    if request.method == 'OPTIONS': return jsonify({"status": "ok"}), 200
 
     data = request.json
     user_message = data.get('message', '')
 
-    if not user_message:
-        return jsonify({"reply": "Empty transmission."}), 400
-
-    # Telegram Alert
-    threading.Thread(target=send_telegram_alert, args=(f"<b>New Incoming:</b> {user_message}",)).start()
-
-    # Gemini API Call
-    url = "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions"
-    headers = {"Content-Type": "application/json", "Authorization": f"Bearer {AI_API_KEY}"}
+    # 1. API End-point (Latest Google AI Studio Endpoint)
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={AI_API_KEY}"
+    
+    headers = {"Content-Type": "application/json"}
     
     payload = {
-        "model": "gemini-1.5-flash",
-        "messages":[
-            {"role": "system", "content": "You are a friendly business assistant. If user gives name, email, or phone, call capture_lead."},
-            {"role": "user", "content": user_message}
-        ],
-        "tools":[{
-            "type": "function",
-            "function": {
-                "name": "capture_lead",
-                "description": "Save lead info",
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "name": {"type": "string"},
-                        "email": {"type": "string"},
-                        "phone": {"type": "string"}
-                    },
-                    "required": ["name"]
-                }
-            }
+        "contents": [{
+            "parts": [{"text": f"You are a helpful AI assistant. Keep responses short and friendly. If the user provides a name AND email/phone, output: LEAD_SECURED_NAME:{user_message}"}]
         }]
     }
 
@@ -72,24 +42,19 @@ def chat_engine():
         response = requests.post(url, headers=headers, json=payload, timeout=20)
         ai_data = response.json()
         
-        # এরর হ্যান্ডলিং (Gemini এরর চেক)
-        if "choices" not in ai_data:
-            return jsonify({"reply": "AI Service error: " + str(ai_data)})
-
-        ai_msg = ai_data['choices'][0]['message']
+        # জেমিনাই এর রেসপন্স থেকে টেক্সট বের করা
+        reply = ai_data['candidates'][0]['content']['parts'][0]['text']
         
-        # Lead detection
-        if 'tool_calls' in ai_msg:
-            func = ai_msg['tool_calls'][0]['function']
-            args = json.loads(func['arguments'])
-            lead_alert = f"🚀 <b>LEAD SECURED!</b>\nName: {args.get('name')}\nEmail: {args.get('email')}\nPhone: {args.get('phone')}"
-            threading.Thread(target=send_telegram_alert, args=(lead_alert,)).start()
-            return jsonify({"reply": "Data logged successfully! Our team will contact you."})
+        # লিড ডিটেকশন সিম্পল লজিক
+        if "LEAD_SECURED_NAME" in reply:
+            threading.Thread(target=send_telegram_alert, args=(f"🚀 <b>LEAD SECURED!</b>\n{reply}",)).start()
+            return jsonify({"reply": "Details logged successfully! Our team will contact you soon."})
 
-        return jsonify({"reply": ai_msg.get('content', "No response")})
+        return jsonify({"reply": reply})
 
     except Exception as e:
-        return jsonify({"reply": "Neural connection failed: " + str(e)}), 500
+        return jsonify({"reply": "AI Brain waking up! Please try again in a few seconds."}), 500
 
 if __name__ == '__main__':
-    app.run(host='0.0.0.0', port=5000)
+    port = int(os.environ.get('PORT', 5000))
+    app.run(host='0.0.0.0', port=port)
